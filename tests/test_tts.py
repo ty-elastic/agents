@@ -1,7 +1,8 @@
 import asyncio
 import wave
 from livekit import agents
-from livekit.plugins import elevenlabs, openai
+#from livekit.plugins import elevenlabs, openai, azure
+from livekit.plugins import azure
 
 TEST_AUDIO_SYNTHESIZE = "the people who are crazy enough to think they can change the world are the ones who do"
 
@@ -16,7 +17,8 @@ def save_wave_file(filename: str, buffer: agents.utils.AudioBuffer) -> None:
 
 
 async def test_synthetize():
-    ttss = [elevenlabs.TTS(), openai.TTS()]
+    #ttss = [elevenlabs.TTS(), openai.TTS(), azure.TTS()]
+    ttss = [azure.TTS()]
 
     async def synthetize(tts: agents.tts.TTS):
         frames = []
@@ -30,7 +32,8 @@ async def test_synthetize():
 
 
 async def test_stream():
-    tts = elevenlabs.TTS()
+    #ttss = [elevenlabs.TTS(), azure.TTS()]
+    ttss = [azure.TTS()]
 
     pattern = [1, 2, 4]
     text = TEST_AUDIO_SYNTHESIZE
@@ -43,24 +46,33 @@ async def test_stream():
         chunks.append(text[:chunk_size])
         text = text[chunk_size:]
 
-    stream = tts.stream()
+    async def stream(tts: agents.tts.TTS):
 
-    for chunk in chunks:
-        stream.push_text(chunk)
+        stream = tts.stream()
 
-    await stream.flush()
+        for chunk in chunks:
+            stream.push_text(chunk)
 
-    frames = []
-    assert (await anext(stream)).type == agents.tts.SynthesisEventType.STARTED
+        await stream.flush()
 
-    async for event in stream:
-        if event.type == agents.tts.SynthesisEventType.FINISHED:
-            break
+        frames = []
+        assert (await anext(stream)).type == agents.tts.SynthesisEventType.STARTED
 
-        assert event.type == agents.tts.SynthesisEventType.AUDIO
-        frames.append(event.audio.data)
+        async for event in stream:
+            if event.type == agents.tts.SynthesisEventType.FINISHED:
+                break
 
-    audio = agents.utils.merge_frames(frames)
-    save_wave_file("2.wav", audio)
+            assert event.type == agents.tts.SynthesisEventType.AUDIO
+            frames.append(event.audio.data)
 
-    await stream.aclose()
+        audio = agents.utils.merge_frames(frames)
+        save_wave_file("2.wav", audio)
+
+        await stream.aclose()
+
+    async with asyncio.TaskGroup() as group:
+        for tts in ttss:
+            group.create_task(stream(tts))
+
+#asyncio.run(test_synthetize())
+asyncio.run(test_stream())
