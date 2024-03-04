@@ -226,12 +226,13 @@ class SpeechStream(stt.SpeechStream):
             self._queue.put_nowait(STREAM_CLOSE_MSG)
 
         def recognized_cb(evt: speechsdk.SpeechRecognitionEventArgs):
+            print('RECOGNIZING: {}'.format(evt))
             stt_event = live_transcription_to_speech_event(evt)
             self._event_queue.put_nowait(stt_event)
 
         # Connect callbacks to the events fired by the speech recognizer
         self._speech_recognizer.recognized.connect(recognized_cb)
-        #speech_recognizer.recognizing.connect(lambda evt: print('RECOGNIZING: {}'.format(evt)))
+        self._speech_recognizer.recognizing.connect(lambda evt: print('RECOGNIZING: {}'.format(evt)))
         #speech_recognizer.session_started.connect(lambda evt: print('SESSION STARTED: {}'.format(evt)))
         #speech_recognizer.session_stopped.connect(lambda evt: print('SESSION STOPPED {}'.format(evt)))
         #speech_recognizer.canceled.connect(lambda evt: print('CANCELED {}'.format(evt)))
