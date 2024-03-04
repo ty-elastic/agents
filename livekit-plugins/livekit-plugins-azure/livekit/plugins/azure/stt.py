@@ -57,6 +57,10 @@ def _create_speech_recognizer(*, config: STTOptions, stream: speechsdk.audio.Aud
     return speech_recognizer
 
 class STT(stt.STT):
+    SAMPLE_RATE: int = 16000
+    BITS_PER_SAMPLE: int = 16
+    NUM_CHANNELS: int = 1
+    
     def __init__(
         self,
         *,
@@ -246,12 +250,16 @@ class SpeechStream(stt.SpeechStream):
         while True:
             # get a frame from the input queue
             data = await self._queue.get()
+
             # check if audio or cntrl
             if isinstance(data, rtc.AudioFrame):
+                # resample to required rate for azure STT
+                frame = data.remix_and_resample(STT.SAMPLE_RATE, STT.NUM_CHANNELS)
+
                 # if we haven't started yet, init speech recognition
                 if self._speech_recognizer == None:
-                    self._start_stream_recognition(data)
-                self._stream.write(data.data.tobytes())
+                    self._start_stream_recognition(frame)
+                self._stream.write(frame.data.tobytes())
             elif data == STREAM_CLOSE_MSG:
                 break
 
