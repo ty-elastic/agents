@@ -253,11 +253,10 @@ class SpeechStream(stt.SpeechStream):
 
             # check if audio or cntrl
             if isinstance(data, rtc.AudioFrame):
+                frame = data
                 # resample to required rate for azure STT
                 if frame.sample_rate != STT.SAMPLE_RATE or frame.num_channels != STT.NUM_CHANNELS:
                     frame = data.remix_and_resample(STT.SAMPLE_RATE, STT.NUM_CHANNELS)
-                else:
-                    frame = data
 
                 # if we haven't started yet, init speech recognition
                 if self._speech_recognizer == None:
