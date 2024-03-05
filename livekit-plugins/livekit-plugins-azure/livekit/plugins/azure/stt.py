@@ -226,13 +226,13 @@ class SpeechStream(stt.SpeechStream):
             self._queue.put_nowait(STREAM_CLOSE_MSG)
 
         def recognized_cb(evt: speechsdk.SpeechRecognitionEventArgs):
-            print('RECOGNIZING: {}'.format(evt))
+            #print('RECOGNIZING: {}'.format(evt))
             stt_event = live_transcription_to_speech_event(evt)
             self._event_queue.put_nowait(stt_event)
 
         # Connect callbacks to the events fired by the speech recognizer
         self._speech_recognizer.recognized.connect(recognized_cb)
-        self._speech_recognizer.recognizing.connect(lambda evt: print('RECOGNIZING: {}'.format(evt)))
+        #self._speech_recognizer.recognizing.connect(lambda evt: print('RECOGNIZING: {}'.format(evt)))
         #speech_recognizer.session_started.connect(lambda evt: print('SESSION STARTED: {}'.format(evt)))
         #speech_recognizer.session_stopped.connect(lambda evt: print('SESSION STOPPED {}'.format(evt)))
         #speech_recognizer.canceled.connect(lambda evt: print('CANCELED {}'.format(evt)))
@@ -243,6 +243,7 @@ class SpeechStream(stt.SpeechStream):
         # Start continuous speech recognition
         if self._config.keyword_model is not None:
             model = speechsdk.KeywordRecognitionModel(self._config.keyword_model)
+            print("model loaded")
             self._speech_recognizer.start_keyword_recognition(model)
         else:
             self._speech_recognizer.start_continuous_recognition()

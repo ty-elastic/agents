@@ -24,6 +24,7 @@ from datetime import datetime, timezone, timedelta
 from livekit import rtc, agents
 from livekit.agents.tts import SynthesisEvent, SynthesisEventType
 import string
+from difflib import SequenceMatcher
 
 from elastic_transcript import ElasticTranscriptPlugin, TranscriptionType
 from livekit.plugins.azure import STT, TTS
@@ -31,11 +32,25 @@ from livekit.plugins.azure import STT, TTS
 INTRO = "Hello, I am Elastic, a friendly assistant powered by Elasticsearch. \
              You can reach me by starting your questions with Hey Elastic."
 
+KEYWORD = "hey elastic"
+
 # convert intro response to a stream
 async def intro_text_stream():
     yield INTRO
 
 AgentState = Enum("AgentState", "IDLE, LISTENING, THINKING, SPEAKING")
+
+def detect_keyword(clause: str) -> str:
+    keywords = clause.translate(str.maketrans('', '', string.punctuation)).lower().split(' ')
+    if len(keywords) >= 2:
+        keyword = " ".join(keywords[:2])
+        s = SequenceMatcher(None,
+                            keyword,
+                            KEYWORD)
+        if s.ratio() >= 0.9:
+            clean = clause.split(' ', 2)
+            return clean[2]
+    return None
 
 class ELK:
     @classmethod
@@ -52,7 +67,6 @@ class ELK:
         )
 
         self.stt_plugin = STT(
-            keyword_model = "resources/hey-elastic.table"
         )
 
         self.tts_plugin = TTS(
@@ -73,6 +87,10 @@ class ELK:
         # if you have to perform teardown cleanup, you can listen to the disconnected event
         # self.ctx.room.on("disconnected", your_cleanup_function)
 
+        self.tts_stream = self.tts_plugin.stream()
+            # send audio to TTS in parallel
+        self.ctx.create_task(self.send_audio_stream(self.tts_stream))
+
         # publish audio track
         track = rtc.LocalAudioTrack.create_audio_track("agent-mic", self.audio_out)
         await self.ctx.room.local_participant.publish_track(track)
@@ -84,28 +102,29 @@ class ELK:
         await self.process_elasticai_result(intro_text_stream(), type=None)
         self.update_state()
 
-    def on_chat_received(self, message: rtc.ChatMessage):
-        if message.deleted:
-            return
-        
-        clause = message.message
-        if clause.translate(str.maketrans('', '', string.punctuation)).lower().startswith("hey elastic"):
-            start = clause.lower().find("elastic") + len("elastic")
-            if clause[start] == ',': start = start+1
-            if clause[start] == ' ': start = start+1
-            clause = clause[start:]
-            print(f"HEY elastic! chat={clause}")
+    def process_input(self, message : str, type : TranscriptionType, participant: rtc.RemoteParticipant):
+
+        clause = detect_keyword(message)
+        if clause != None:
+            print(f"recognized Hey Elastic! {clause}")
             assistant_stream = self.elastictranscript_plugin.make_assistant_stream(clause)
-            self.ctx.create_task(self.process_elasticai_result(assistant_stream, type=TranscriptionType.Chat))
+            self.ctx.create_task(self.process_elasticai_result(assistant_stream, type=type))
         else:
+            clause = message
+
             self.elastictranscript_plugin.push_transcript(
-                participant_name=message.participant.name,
-                type=TranscriptionType.Chat,
+                participant_name=participant.name,
+                type=type,
                 timestamp=datetime.now(tz=timezone.utc),
                 clause=clause,
                 conference_id=self.ctx.room.sid
             )
 
+    def on_chat_received(self, message: rtc.ChatMessage):
+        if message.deleted:
+            return
+        
+        self.process_input(message.message, TranscriptionType.Chat, message.participant)
 
     def on_track_subscribed(
         self,
@@ -117,39 +136,20 @@ class ELK:
 
     async def process_track(self, track: rtc.Track, participant: rtc.RemoteParticipant):
         audio_stream = rtc.AudioStream(track)
+
         stream = self.stt_plugin.stream()
         self.ctx.create_task(self.process_stt_stream(stream, participant))
+
         async for audio_frame_event in audio_stream:
-            if self._agent_state != AgentState.LISTENING:
-                continue
             stream.push_frame(audio_frame_event.frame)
         await stream.flush()
 
     async def process_stt_stream(self, stream, participant: rtc.RemoteParticipant):
-
         async for event in stream:
             if event.alternatives[0].text == "" or not event.end_of_speech or not event.is_final:
                 continue
-            
-            clause = event.alternatives[0].text
-
-            if clause.translate(str.maketrans('', '', string.punctuation)).lower().startswith("hey elastic"):
-                print(f"HEY elastic! STT={clause}")
-                start = clause.lower().find("elastic") + len("elastic")
-                if clause[start] == ',': start = start+1
-                if clause[start] == ' ': start = start+1
-                clause = clause[start:]
-                assistant_stream = self.elastictranscript_plugin.make_assistant_stream(clause)
-                self.ctx.create_task(self.process_elasticai_result(assistant_stream, TranscriptionType.Spoken))
-            else:
-                print(clause)
-                self.elastictranscript_plugin.push_transcript(
-                    participant_name=participant.name,
-                    timestamp=datetime.now(tz=timezone.utc),
-                    clause=clause,
-                    type=TranscriptionType.Spoken,
-                    conference_id=self.ctx.room.sid
-                )
+                
+            self.process_input(event.alternatives[0].text, TranscriptionType.Spoken, participant)
 
     async def process_elasticai_result(self, text_stream, type : TranscriptionType):
         if type == TranscriptionType.Chat:
@@ -161,18 +161,14 @@ class ELK:
             # ChatGPT is streamed, so we'll flip the state immediately
             self.update_state(processing=True)
 
-            stream = self.tts_plugin.stream()
-            # send audio to TTS in parallel
-            self.ctx.create_task(self.send_audio_stream(stream))
             all_text = ""
             async for text in text_stream:
-                print(f"pushing {text} to TTS")
-                stream.push_text(text)
+                self.tts_stream.push_text(text)
                 all_text += text
 
             self.update_state(processing=False)
 
-            await stream.flush()
+            await self.tts_stream.flush()
 
     async def send_audio_stream(self, tts_stream: AsyncIterable[SynthesisEvent]):
         async for e in tts_stream:
@@ -182,9 +178,8 @@ class ELK:
                 self.update_state(sending_audio=False)
             elif e.type == SynthesisEventType.AUDIO:
                 await self.audio_out.capture_frame(e.audio.data)
-        print("CLOSIN STRWEAM")
+
         await tts_stream.aclose()
-        print("IT IS... CLOSED!")
 
     def update_state(self, sending_audio: bool = None, processing: bool = None):
         if sending_audio is not None:
