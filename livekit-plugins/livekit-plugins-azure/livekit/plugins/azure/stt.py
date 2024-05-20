@@ -11,12 +11,13 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import time
 import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 
 from livekit import rtc
 from livekit.agents import stt
@@ -24,14 +25,12 @@ from livekit.agents.utils import AudioBuffer, merge_frames
 
 import azure.cognitiveservices.speech as speechsdk
 
-STREAM_CLOSE_MSG: str = json.dumps({"type": "CloseStream"})
-
 @dataclass
 class STTOptions:
     # filename - see https://learn.microsoft.com/en-us/azure/ai-services/speech-service/keyword-recognition-overview
     keyword_model: str
-    speech_key: str 
-    speech_region: str 
+    speech_key: str
+    speech_region: str
     # see https://learn.microsoft.com/en-us/azure/ai-services/speech-service/language-support?tabs=stt
     languages: list[str]
     grammar: list[str]
@@ -46,11 +45,11 @@ def _create_speech_recognizer(*, config: STTOptions, stream: speechsdk.audio.Aud
             speechsdk.languageconfig.AutoDetectSourceLanguageConfig(languages=config.languages)
 
     audio_config = speechsdk.audio.AudioConfig(stream=stream)
-    speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config, 
+    speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config,
                                                    auto_detect_source_language_config=auto_detect_source_language_config)
     
     # add custom phrases to aid in vertical-specific language recognition
-    phrase_list_grammar = speechsdk.PhraseListGrammar.from_recognizer(speech_recognizer) 
+    phrase_list_grammar = speechsdk.PhraseListGrammar.from_recognizer(speech_recognizer)
     for phrase in config.grammar:
         phrase_list_grammar.addPhrase(phrase)
 
@@ -78,7 +77,7 @@ class STT(stt.STT):
         speech_region = speech_region or os.environ.get("AZURE_SPEECH_REGION")
         if not speech_region:
             raise ValueError("AZURE_SPEECH_REGION must be set")
-
+        
         self._config = STTOptions(
             keyword_model=keyword_model,
             speech_key=speech_key,
@@ -189,6 +188,7 @@ class SpeechStream(stt.SpeechStream):
         self._event_queue = asyncio.Queue[stt.SpeechEvent]()
         self._closed = False
         self._speech_recognizer = None
+        self._speaking = False
 
         self._main_task = asyncio.create_task(self._run())
 
@@ -202,41 +202,61 @@ class SpeechStream(stt.SpeechStream):
             raise ValueError("cannot push frame to closed stream")
         self._queue.put_nowait(frame)
 
-    async def flush(self) -> None:
-        # wait for all input frames to process
-        await self._queue.join()
+    async def aclose(self, wait: bool = True) -> None:
+        self._closed = True
+        if not wait:
+            self._main_task.cancel()
 
-    async def aclose(self) -> None:
-        # signal a desire to close
-        await self._queue.put(STREAM_CLOSE_MSG)
-        # wait for main task to end
-        await self._main_task
+        self._queue.put_nowait(None)
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._main_task
 
-    def _start_stream_recognition(self, data : rtc.AudioFrame):
+    def _start_stream_recognition(self, data : rtc.AudioFrame) -> speechsdk.audio.PushAudioInputStream:
         # align format to first frame
         sample_width = data.data.nbytes / data.samples_per_channel
-        wave_format = speechsdk.audio.AudioStreamFormat(samples_per_second=data.sample_rate, 
+        wave_format = speechsdk.audio.AudioStreamFormat(samples_per_second=data.sample_rate,
                                                         bits_per_sample=int(8*sample_width),
                                                         channels=data.num_channels)
-        self._stream = speechsdk.audio.PushAudioInputStream(stream_format=wave_format)
-        self._speech_recognizer = _create_speech_recognizer(config=self._config, stream=self._stream)
+        stream = speechsdk.audio.PushAudioInputStream(stream_format=wave_format)
+        self._speech_recognizer = _create_speech_recognizer(config=self._config, stream=stream)
 
         def cancelled_cb(evt: speechsdk.SessionEventArgs):
-            self._queue.put_nowait(STREAM_CLOSE_MSG)
+            #print('CANCELLED: {}'.format(evt))
+            self._queue.put_nowait(None)
 
         def recognized_cb(evt: speechsdk.SpeechRecognitionEventArgs):
-            #print('RECOGNIZING: {}'.format(evt))
-            stt_event = live_transcription_to_speech_event(evt)
-            self._event_queue.put_nowait(stt_event)
+            #print('RECOGNIZED: {}'.format(evt))
+            if evt.result.reason == speechsdk.ResultReason.RecognizedKeyword or evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                auto_detect_source_language_result = speechsdk.AutoDetectSourceLanguageResult(evt.result)
+                se = stt.SpeechEvent(
+                    type = stt.SpeechEventType.END_OF_SPEECH,
+                    alternatives=[
+                        stt.SpeechData(
+                            language=auto_detect_source_language_result.language,
+                            start_time=0,
+                            end_time=0,
+                            confidence=1,
+                            text=evt.result.text
+                        )
+                    ],
+                )
+                self._event_queue.put_nowait(se)
+
+        def started_cb(evt: speechsdk.SpeechRecognitionEventArgs):
+            #print('STARTED: {}'.format(evt))
+            self._speaking = True
+            start_event = stt.SpeechEvent(type=stt.SpeechEventType.START_OF_SPEECH)
+            self._event_queue.put_nowait(start_event)
+
+        def stopped_cb(evt: speechsdk.SpeechRecognitionEventArgs):
+            #print('STOPPED: {}'.format(evt))
+            self._speaking = False
 
         # Connect callbacks to the events fired by the speech recognizer
         self._speech_recognizer.recognized.connect(recognized_cb)
         #self._speech_recognizer.recognizing.connect(lambda evt: print('RECOGNIZING: {}'.format(evt)))
-        #speech_recognizer.session_started.connect(lambda evt: print('SESSION STARTED: {}'.format(evt)))
-        #speech_recognizer.session_stopped.connect(lambda evt: print('SESSION STOPPED {}'.format(evt)))
-        #speech_recognizer.canceled.connect(lambda evt: print('CANCELED {}'.format(evt)))
-        # stop continuous recognition on either session stopped or canceled events
-        #self._speech_recognizer.session_stopped.connect(stop_cb)
+        self._speech_recognizer.session_started.connect(started_cb)
+        self._speech_recognizer.session_stopped.connect(stopped_cb)
         self._speech_recognizer.canceled.connect(cancelled_cb)
 
         # Start continuous speech recognition
@@ -246,9 +266,12 @@ class SpeechStream(stt.SpeechStream):
             self._speech_recognizer.start_keyword_recognition(model)
         else:
             self._speech_recognizer.start_continuous_recognition()
+            
+        return stream
 
     async def _run(self) -> None:
-        while True:
+        stream = None
+        while not self._closed:
             # get a frame from the input queue
             data = await self._queue.get()
 
@@ -260,10 +283,10 @@ class SpeechStream(stt.SpeechStream):
                     frame = data.remix_and_resample(STT.SAMPLE_RATE, STT.NUM_CHANNELS)
 
                 # if we haven't started yet, init speech recognition
-                if self._speech_recognizer == None:
-                    self._start_stream_recognition(frame)
-                self._stream.write(frame.data.tobytes())
-            elif data == STREAM_CLOSE_MSG:
+                if stream is None:
+                    stream = self._start_stream_recognition(frame)
+                stream.write(frame.data.tobytes())
+            elif data is None:
                 break
 
             self._queue.task_done()
@@ -272,35 +295,12 @@ class SpeechStream(stt.SpeechStream):
             self._speech_recognizer.stop_keyword_recognition()
         else:
             self._speech_recognizer.stop_continuous_recognition()
-
-        self._closed = True
+        
+        self._event_queue.put_nowait(None)
 
     async def __anext__(self) -> stt.SpeechEvent:
-        if self._closed and self._event_queue.empty():
+        evt = await self._event_queue.get()
+        if evt is None:
             raise StopAsyncIteration
 
-        return await self._event_queue.get()
-
-def live_transcription_to_speech_event(
-    evt: speechsdk.SpeechRecognitionEventArgs
-) -> stt.SpeechEvent:
-        
-    auto_detect_source_language_result = speechsdk.AutoDetectSourceLanguageResult(evt.result)
-    
-    if evt.result.reason == speechsdk.ResultReason.RecognizedKeyword or evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-        type = stt.SpeechEventType.END_OF_SPEECH
-    else:
-        type = stt.SpeechEventType.INTERIM_TRANSCRIPT
-    
-    return stt.SpeechEvent(
-        type=type,
-        alternatives=[
-            stt.SpeechData(
-                language=auto_detect_source_language_result.language,
-                start_time=0,
-                end_time=0,
-                confidence=1,
-                text=evt.result.text
-            )
-        ],
-    )
+        return evt

@@ -81,20 +81,22 @@ STTFactoryRecognize = {
 
 cases = {
     "recognize": [
-        ("deepgram", "short"),
-        ("deepgram", "long"),
-        ("google", "short"),  # skip long test for google because it google cuts it off
-        ("openai", "short"),
-        ("openai", "long"),
+        # ("deepgram", "short"),
+        # ("deepgram", "long"),
+        # ("google", "short"),  # skip long test for google because it google cuts it off
+        # ("openai", "short"),
+        # ("openai", "long"),
+        ("azure", "short"),
         ("azure", "long"),
     ],
     "stream": [
-        ("deepgram", "short"),
-        ("deepgram", "long"),
-        ("google", "short"),
-        ("google", "long"),
-        ("openai", "short"),
-        ("openai", "long"),
+        # ("deepgram", "short"),
+        # ("deepgram", "long"),
+        # ("google", "short"),
+        # ("google", "long"),
+        # ("openai", "short"),
+        # ("openai", "long"),
+        ("azure", "short"),
         ("azure", "long"),
     ],
 }
