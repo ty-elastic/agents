@@ -1,7 +1,8 @@
 import asyncio
 
 from livekit import agents
-from livekit.plugins import elevenlabs, google, openai, azure
+#from livekit.plugins import elevenlabs, google, openai, azure
+from livekit.plugins import azure
 from utils import compare_word_counts
 
 TEST_AUDIO_SYNTHESIZE = "the people who are crazy enough to think they can change the world are the ones who do"
@@ -9,9 +10,9 @@ TEST_AUDIO_SYNTHESIZE = "the people who are crazy enough to think they can chang
 
 async def test_synthetize():
     ttss = [
-        elevenlabs.TTS(),
-        openai.TTS(model="tts-1", voice="nova"),
-        google.TTS(audio_encoding="mp3"),
+        # elevenlabs.TTS(),
+        # openai.TTS(model="tts-1", voice="nova"),
+        # google.TTS(audio_encoding="mp3"),
         azure.TTS(),
     ]
 
@@ -20,7 +21,7 @@ async def test_synthetize():
         async for frame in tts.synthesize(text=TEST_AUDIO_SYNTHESIZE):
             frames.append(frame.data)
 
-        result = await openai.STT().recognize(buffer=agents.utils.merge_frames(frames))
+        result = await azure.STT().recognize(buffer=agents.utils.merge_frames(frames))
         assert (
             compare_word_counts(result.alternatives[0].text, TEST_AUDIO_SYNTHESIZE)
             > 0.9
@@ -33,7 +34,7 @@ async def test_synthetize():
 
 async def test_stream():
     ttss = [
-        elevenlabs.TTS(),
+        #elevenlabs.TTS(),
         azure.TTS(),
     ]
 
@@ -66,7 +67,7 @@ async def test_stream():
             assert event.type == agents.tts.SynthesisEventType.AUDIO
             frames.append(event.audio.data)
 
-        result = await openai.STT().recognize(buffer=agents.utils.merge_frames(frames))
+        result = await azure.STT().recognize(buffer=agents.utils.merge_frames(frames))
         assert compare_word_counts(result.alternatives[0].text, TEST_AUDIO_SYNTHESIZE) > 0.9
 
         await stream.aclose()

@@ -12,24 +12,23 @@
 
 import contextlib
 import asyncio
-import logging
 import os
 from dataclasses import dataclass
-from typing import Optional, AsyncIterable
+from typing import Optional
 
 from livekit import rtc
-from livekit.agents import tts, utils
+from livekit.agents import tts
 
 import azure.cognitiveservices.speech as speechsdk
 
 @dataclass
-class TTSOptions:
+class _TTSOptions:
     speech_key: str = None
     speech_region: str = None
     # see https://learn.microsoft.com/en-us/azure/ai-services/speech-service/language-support?tabs=tts
     voice: str = None
 
-def _create_speech_synthesizer(*, config: TTSOptions, stream : speechsdk.audio.AudioOutputStream) -> speechsdk.SpeechSynthesizer:
+def _create_speech_synthesizer(*, config: _TTSOptions, stream : speechsdk.audio.AudioOutputStream) -> speechsdk.SpeechSynthesizer:
     # Creates an instance of a speech config with specified subscription key and service region.
     speech_config = speechsdk.SpeechConfig(subscription=config.speech_key, region=config.speech_region)
     # add stream output
@@ -52,7 +51,7 @@ class TTS(tts.TTS):
         speech_region: Optional[str] = None,
         voice: Optional[str] = None
     ) -> None:
-        super().__init__(streaming_supported=True)
+        super().__init__(streaming_supported=True, sample_rate=TTS.SAMPLE_RATE, num_channels=TTS.NUM_CHANNELS)
 
         speech_key = speech_key or os.environ.get("AZURE_SPEECH_KEY")
         if not speech_key:
@@ -61,7 +60,7 @@ class TTS(tts.TTS):
         if not speech_region:
             raise ValueError("AZURE_SPEECH_REGION must be set")
 
-        self._config = TTSOptions(
+        self._opts = _TTSOptions(
             speech_key=speech_key,
             speech_region=speech_region,
             voice=voice
@@ -69,44 +68,54 @@ class TTS(tts.TTS):
 
     def synthesize(
         self,
-        *,
         text: str,
-    ) -> AsyncIterable[tts.SynthesizedAudio]:
-        
-        # output queue
-        results = utils.AsyncIterableQueue()
+    ) -> "ChunkedStream":
+        return ChunkedStream(text, self._opts)
 
-        async def process():
-            nonlocal results
+    def stream(
+        self,
+    ) -> "SynthesizeStream":
+        return SynthesizeStream(self._opts)
 
-            class PushAudioOutputStreamCallback(speechsdk.audio.PushAudioOutputStreamCallback):
-                def __init__(self, push_queue: utils.AsyncIterableQueue):
-                    super().__init__()
-                    self._event_queue = push_queue
+class ChunkedStream(tts.ChunkedStream):
+    def __init__(
+        self, text: str, opts: _TTSOptions
+    ) -> None:
+        self._opts = opts
+        self._text = text
+        self._main_task: asyncio.Task | None = None
+        self._queue = asyncio.Queue[tts.SynthesizedAudio | None]()
+ 
+    async def _run(self):
+        class PushAudioOutputStreamCallback(speechsdk.audio.PushAudioOutputStreamCallback):
+            def __init__(self, push_queue: asyncio.Queue[tts.SynthesizedAudio | None]):
+                super().__init__()
+                self._event_queue = push_queue
 
-                def write(self, audio_buffer: memoryview) -> int:
-                    # create a rtc frame
-                    audio_frame = rtc.AudioFrame(
-                        data=audio_buffer,
-                        sample_rate=TTS.SAMPLE_RATE,
-                        num_channels=TTS.NUM_CHANNELS,
-                        samples_per_channel=audio_buffer.nbytes // 2,
+            def write(self, audio_buffer: memoryview) -> int:
+                # create a rtc frame
+                audio_frame = rtc.AudioFrame(
+                    data=audio_buffer,
+                    sample_rate=TTS.SAMPLE_RATE,
+                    num_channels=TTS.NUM_CHANNELS,
+                    samples_per_channel=audio_buffer.nbytes // 2,
+                )
+                # and write to output queue
+                self._event_queue.put_nowait(
+                    tts.SynthesizedAudio(
+                        text="",
+                        data=audio_frame
                     )
-                    # and write to output queue
-                    self._event_queue.put_nowait(
-                        tts.SynthesizedAudio(
-                            text="",
-                            data=audio_frame
-                        )
-                    )
-                    return audio_buffer.nbytes
+                )
+                return audio_buffer.nbytes
 
-            stream_callback = PushAudioOutputStreamCallback(results)
+        try:
+            stream_callback = PushAudioOutputStreamCallback(self._queue)
             push_stream = speechsdk.audio.PushAudioOutputStream(stream_callback)
-            speech_synthesizer = _create_speech_synthesizer(config=self._config, stream=push_stream)
+            speech_synthesizer = _create_speech_synthesizer(config=self._opts, stream=push_stream)
 
             # wait for completion
-            result = speech_synthesizer.speak_text_async(text).get()
+            result = speech_synthesizer.speak_text_async(self._text).get()
             if result.reason == speechsdk.ResultReason.Canceled:
                 print("Speech synthesis canceled: {}".format(result.cancellation_details.reason))
 
@@ -115,53 +124,103 @@ class TTS(tts.TTS):
             # Destroys the synthesizer in order to close the output stream.
             del speech_synthesizer
 
-            results.close()
+            #results.close()
 
-        asyncio.ensure_future(process())
-        return results
+        except Exception:
+            print("failed to synthesize")
+        finally:
+            self._queue.put_nowait(None)
+            
+    async def __anext__(self) -> tts.SynthesizedAudio:
+        if not self._main_task:
+            self._main_task = asyncio.create_task(self._run())
 
-    def stream(
-        self,
-    ) -> tts.SynthesizeStream:
-        return SynthesizeStream(self._config)
+        frame = await self._queue.get()
+        if frame is None:
+            raise StopAsyncIteration
+
+        return frame
+
+    async def aclose(self) -> None:
+        if not self._main_task:
+            return
+
+        self._main_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._main_task
+
+
 
 class SynthesizeStream(tts.SynthesizeStream):
     def __init__(
         self,
-        config: TTSOptions,
+        opts: _TTSOptions
     ):
-        self._config = config
+        self._opts = opts
 
-        self._queue = asyncio.Queue[str]()
-        self._event_queue = asyncio.Queue[tts.SynthesisEvent]()
+        self._queue = asyncio.Queue[str | None]()
+        self._event_queue = asyncio.Queue[tts.SynthesisEvent | None]()
         self._closed = False
+        self._text = ""
 
         self._main_task = asyncio.create_task(self._run())
 
-        def log_exception(task: asyncio.Task) -> None:
-            if not task.cancelled() and task.exception():
-                logging.error(f"azure synthesis task failed: {task.exception()}, {task.print_stack()}")
-        self._main_task.add_done_callback(log_exception)
-
-        self._text = ""
-
-    def push_text(self, token: str) -> None:
+    def push_text(self, token: str | None) -> None:
         if self._closed:
             raise ValueError("cannot push to a closed stream")
 
-        if not token or len(token) == 0:
+        if token is None:
+            self._flush_if_needed()
             return
 
-        # TODO: Native word boundary detection may not be good enough for all languages
+        if len(token) == 0:
+            # 11labs marks the EOS with an empty string, avoid users from pushing empty strings
+            return
+
+        # TODO: Naive word boundary detection may not be good enough for all languages
         # fmt: off
         splitters = (".", ",", "?", "!", ";", ":", "—", "-", "(", ")", "[", "]", "}", " ")
         # fmt: on
 
         self._text += token
-        if token[-1] in splitters:
-            self._queue.put_nowait(self._text)
-            self._text = ""
 
+        while True:
+            last_split = -1
+            for i, c in enumerate(self._text):
+                if c in splitters:
+                    last_split = i
+                    break
+
+            if last_split == -1:
+                break
+
+            seg = self._text[: last_split + 1]
+            seg = seg.strip() + " "  # 11labs expects a space at the end
+            self._queue.put_nowait(seg)
+            self._text = self._text[last_split + 1 :]
+
+    async def aclose(self, *, wait: bool = True) -> None:
+        self._flush_if_needed()
+        self._queue.put_nowait(None)
+        self._closed = True
+
+        if not wait:
+            self._main_task.cancel()
+
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._main_task
+
+    def _flush_if_needed(self) -> None:
+        seg = self._text.strip()
+        if len(seg) > 0:
+            self._queue.put_nowait(seg + " ")
+
+        self._text = ""
+        
+    async def flush(self) -> None:
+        self._flush_if_needed()
+        await self._queue.join()
+        
     async def _run(self) -> None:
 
         class PushAudioOutputStreamCallback(speechsdk.audio.PushAudioOutputStreamCallback):
@@ -188,7 +247,7 @@ class SynthesizeStream(tts.SynthesizeStream):
 
         stream_callback = PushAudioOutputStreamCallback(self._event_queue)
         push_stream = speechsdk.audio.PushAudioOutputStream(stream_callback)
-        speech_synthesizer = _create_speech_synthesizer(config=self._config, stream=push_stream)
+        speech_synthesizer = _create_speech_synthesizer(config=self._opts, stream=push_stream)
 
         running = False
         # Receives a text from queue and synthesizes it to stream output.
@@ -202,6 +261,8 @@ class SynthesizeStream(tts.SynthesizeStream):
                     running = False
                 # wait for new inpurt
                 text = await self._queue.get()
+                if text is None:
+                    break
             except asyncio.CancelledError as e:
                 # someone cancelled the wait
                 break
@@ -214,7 +275,7 @@ class SynthesizeStream(tts.SynthesizeStream):
                 running = True
 
             # wait for result
-            result = speech_synthesizer.speak_text_async(text).get()
+            result = speech_synthesizer.speak_text(text)
             self._queue.task_done()
 
             if result.reason == speechsdk.ResultReason.Canceled:
@@ -232,19 +293,12 @@ class SynthesizeStream(tts.SynthesizeStream):
 
         # Destroys the synthesizer in order to close the output stream.
         del speech_synthesizer
-
-    async def flush(self) -> None:
-        self._queue.put_nowait(self._text + " ")
-        self._text = ""
-        await self._queue.join()
-
-    async def aclose(self) -> None:
-        await self.flush()
-        self._main_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._main_task
+        
+        self._event_queue.put_nowait(None)
 
     async def __anext__(self) -> tts.SynthesisEvent:
-        if self._closed and self._event_queue.empty():
+        evt = await self._event_queue.get()
+        if evt is None:
             raise StopAsyncIteration
-        return await self._event_queue.get()
+
+        return evt
