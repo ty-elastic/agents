@@ -1,7 +1,7 @@
 import asyncio
 
 from livekit import agents
-from livekit.plugins import elevenlabs, google, openai
+from livekit.plugins import elevenlabs, google, openai, azure
 from utils import compare_word_counts
 
 TEST_AUDIO_SYNTHESIZE = "the people who are crazy enough to think they can change the world are the ones who do"
@@ -12,6 +12,7 @@ async def test_synthetize():
         elevenlabs.TTS(),
         openai.TTS(model="tts-1", voice="nova"),
         google.TTS(audio_encoding="mp3"),
+        azure.TTS(),
     ]
 
     async def synthetize(tts: agents.tts.TTS):
@@ -31,7 +32,10 @@ async def test_synthetize():
 
 
 async def test_stream():
-    tts = elevenlabs.TTS()
+    ttss = [
+        elevenlabs.TTS(),
+        azure.TTS(),
+    ]
 
     pattern = [1, 2, 4]
     text = TEST_AUDIO_SYNTHESIZE
@@ -44,24 +48,25 @@ async def test_stream():
         chunks.append(text[:chunk_size])
         text = text[chunk_size:]
 
-    stream = tts.stream()
+    for tts in ttss:
+        stream = tts.stream()
 
-    for chunk in chunks:
-        stream.push_text(chunk)
+        for chunk in chunks:
+            stream.push_text(chunk)
 
-    await stream.flush()
+        await stream.flush()
 
-    frames = []
-    assert (await anext(stream)).type == agents.tts.SynthesisEventType.STARTED
+        frames = []
+        assert (await anext(stream)).type == agents.tts.SynthesisEventType.STARTED
 
-    async for event in stream:
-        if event.type == agents.tts.SynthesisEventType.FINISHED:
-            break
+        async for event in stream:
+            if event.type == agents.tts.SynthesisEventType.FINISHED:
+                break
 
-        assert event.type == agents.tts.SynthesisEventType.AUDIO
-        frames.append(event.audio.data)
+            assert event.type == agents.tts.SynthesisEventType.AUDIO
+            frames.append(event.audio.data)
 
-    result = await openai.STT().recognize(buffer=agents.utils.merge_frames(frames))
-    assert compare_word_counts(result.alternatives[0].text, TEST_AUDIO_SYNTHESIZE) > 0.9
+        result = await openai.STT().recognize(buffer=agents.utils.merge_frames(frames))
+        assert compare_word_counts(result.alternatives[0].text, TEST_AUDIO_SYNTHESIZE) > 0.9
 
-    await stream.aclose()
+        await stream.aclose()

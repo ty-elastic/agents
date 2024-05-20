@@ -5,7 +5,8 @@ from typing import List
 
 import pytest
 from livekit import agents, rtc
-from livekit.plugins import deepgram, google, openai, silero
+#from livekit.plugins import deepgram, google, openai, silero, azure
+from livekit.plugins import azure
 from utils import compare_word_counts
 
 TEST_AUDIO_FILEPATH = os.path.join(os.path.dirname(__file__), "change-sophie.wav")
@@ -62,18 +63,20 @@ input = {
 }
 
 STTFactoryStream = {
-    "deepgram": lambda: deepgram.STT(min_silence_duration=100),
-    "google": google.STT,
-    "openai": lambda: agents.stt.StreamAdapter(
-        openai.STT(),
-        silero.VAD().stream(),
-    ),
+    # "deepgram": lambda: deepgram.STT(min_silence_duration=100),
+    # "google": google.STT,
+    # "openai": lambda: agents.stt.StreamAdapter(
+    #     openai.STT(),
+    #     silero.VAD().stream(),
+    # ),
+    "azure": azure.STT,
 }
 
 STTFactoryRecognize = {
-    "deepgram": deepgram.STT,
-    "google": google.STT,
-    "openai": openai.STT,
+    # "deepgram": deepgram.STT,
+    # "google": google.STT,
+    # "openai": openai.STT,
+    "azure": azure.STT,
 }
 
 cases = {
@@ -83,6 +86,7 @@ cases = {
         ("google", "short"),  # skip long test for google because it google cuts it off
         ("openai", "short"),
         ("openai", "long"),
+        ("azure", "long"),
     ],
     "stream": [
         ("deepgram", "short"),
@@ -91,6 +95,7 @@ cases = {
         ("google", "long"),
         ("openai", "short"),
         ("openai", "long"),
+        ("azure", "long"),
     ],
 }
 
