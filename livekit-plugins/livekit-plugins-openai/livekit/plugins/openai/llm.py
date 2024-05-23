@@ -71,6 +71,7 @@ class LLMStream(llm.LLMStream):
         fnc_name = None
         fnc_args = None
         fnc_idx = None
+        fnc_id = None
 
         async for chunk in self._oai_stream:
             for i, choice in enumerate(chunk.choices):
@@ -82,8 +83,8 @@ class LLMStream(llm.LLMStream):
                         assert finfo is not None
 
                         if tool.index != fnc_idx and fnc_idx is not None:
-                            await self._call_function(fnc_name, fnc_args)
-                            fnc_name = fnc_args = fnc_idx = None
+                            await self._call_function(fnc_id, fnc_name, fnc_args)
+                            fnc_name = fnc_args = fnc_idx = fnc_id = None
 
                         if finfo.name:
                             if fnc_idx is not None:
@@ -93,18 +94,33 @@ class LLMStream(llm.LLMStream):
                             fnc_name = finfo.name
                             fnc_args = finfo.arguments
                             fnc_idx = tool.index
+                            fnc_id = tool.id
                         else:
                             assert fnc_name is not None
                             assert fnc_args is not None
                             assert fnc_idx is not None
+                            assert fnc_id is not None
 
                             if finfo.arguments:
                                 fnc_args += finfo.arguments
                     continue
 
                 if choice.finish_reason == "tool_calls":
-                    await self._call_function(fnc_name, fnc_args)
-                    continue
+                    ret_val = await self._call_function(fnc_id, fnc_name, fnc_args)
+                    print(f"ret_val={ret_val}")
+                    if ret_val is not None:
+                        return llm.ChatMessage(
+                            role=llm.ChatRole.ASSISTANT,
+                            text=None,
+                            tool_calls=[
+                                llm.ToolCall(
+                                    id=fnc_id,
+                                    function=llm.Function(
+                                        arguments=fnc_args,
+                                        name=fnc_name),
+                                    type='function'
+                                )
+                            ])
 
                 return llm.ChatChunk(
                     choices=[
@@ -122,13 +138,18 @@ class LLMStream(llm.LLMStream):
 
     async def _call_function(
         self,
+        id: str,
         name: str | None = None,
         arguments: str | None = None,
-    ) -> None:
+    ) -> type | None:
         assert self._fnc_ctx
 
         if name is None:
             logger.error("received tool call but no function name")
+            return
+
+        if id is None:
+            logger.error("received tool call but no function id")
             return
 
         fncs = self._fnc_ctx.ai_functions
@@ -182,10 +203,7 @@ class LLMStream(llm.LLMStream):
                     logger.error(f"invalid arg {arg.name} for ai_callable {name}")
                     return
 
-        logger.debug(f"calling function {name} with arguments {args}")
-        self._called_functions.append(
-            llm.CalledFunction(fnc_name=name, fnc=fnc.fnc, args=args)
-        )
+        logger.debug(f"calling function {name}, id {id} with arguments {args}")
         func = functools.partial(fnc.fnc, **args)
         if asyncio.iscoroutinefunction(fnc.fnc):
             task = asyncio.create_task(func())
@@ -195,10 +213,14 @@ class LLMStream(llm.LLMStream):
         def _task_done(task: asyncio.Task) -> None:
             if not task.cancelled() and task.exception():
                 logger.error("ai_callable task failed", exc_info=task.exception())
+            self._called_functions.append(
+                llm.CalledFunction(fnc_name=name, fnc=fnc.fnc, args=args, id=id, result=task.result())
+            )
             self._running_fncs.discard(task)
 
         task.add_done_callback(_task_done)
         self._running_fncs.add(task)
+        return fnc.ret_val
 
     async def aclose(self, wait: bool = True) -> None:
         await self._oai_stream.close()
@@ -211,13 +233,28 @@ class LLMStream(llm.LLMStream):
 
 
 def to_openai_ctx(chat_ctx: llm.ChatContext) -> list:
-    return [
-        {
+    openai_ctx = []
+    for msg in chat_ctx.messages:
+        openai_msg = {
             "role": msg.role.value,
             "content": msg.text,
         }
-        for msg in chat_ctx.messages
-    ]
+        if msg.id != None:
+            openai_msg['tool_call_id'] = msg.id
+        if msg.name != None:
+            openai_msg['name'] = msg.name
+        for tool_call in msg.tool_calls:
+            openai_tool_call = {}
+            openai_tool_call['id'] = tool_call.id
+            openai_tool_call['function'] = {}
+            openai_tool_call['function']['arguments'] = tool_call.function.arguments
+            openai_tool_call['function']['name'] = tool_call.function.name
+            openai_tool_call['type'] = 'function'
+            if 'tool_calls' not in openai_msg:
+                openai_msg['tool_calls'] = []
+            openai_msg['tool_calls'].append(openai_tool_call)
+        openai_ctx.append(openai_msg)
+    return openai_ctx
 
 
 def to_openai_tools(fnc_ctx: llm.FunctionContext):

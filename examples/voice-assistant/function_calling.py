@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from enum import Enum
 from typing import Annotated
 
@@ -11,30 +12,46 @@ from livekit.agents import (
     llm,
 )
 from livekit.agents.voice_assistant import AssistantContext, VoiceAssistant
-from livekit.plugins import deepgram, elevenlabs, openai, silero
+from livekit.plugins import deepgram, elevenlabs, openai, silero, azure
+from openai import AsyncAzureOpenAI
 
+AZURE_OPENAI_APIVERSION = "2023-12-01-preview"
+OPENAI_MODEL = "gpt-4-turbo"
 
+DEBUG_ENABLE = True
+if DEBUG_ENABLE:
+    logging.basicConfig(level=logging.DEBUG)
+    
 class Room(Enum):
     BEDROOM = "bedroom"
     LIVING_ROOM = "living room"
     KITCHEN = "kitchen"
     BATHROOM = "bathroom"
     OFFICE = "office"
-
-
+    
+light_state = {}
+    
 class AssistantFnc(llm.FunctionContext):
     @llm.ai_callable(desc="Turn on/off the lights in a room")
     async def toggle_light(
         self,
         room: Annotated[Room, llm.TypeInfo(desc="The specific room")],
-        status: bool,
+        state: Annotated[bool, llm.TypeInfo(desc="The desired state of the lights; set True for 'on', set False for 'off'")],
     ):
-        logging.info("toggle_light %s %s", room, status)
+        logging.info("toggle_light %s %s", room, state)
+        light_state[room] = state
         ctx = AssistantContext.get_current()
-        key = "enabled_rooms" if status else "disabled_rooms"
-        li = ctx.get_metadata(key, [])
-        li.append(room)
-        ctx.store_metadata(key, li)
+        ctx.store_metadata('changed_room', room)
+
+    @llm.ai_callable(desc="Returns true if a light in the room is on, otherwise false")
+    async def get_light_status(
+        self,
+        room: Annotated[Room, llm.TypeInfo(desc="The specificied room")],
+    ) -> bool:
+        if room in light_state:
+            return room
+        else:
+            return False
 
     @llm.ai_callable(desc="User want the assistant to stop/pause speaking")
     def stop_speaking(self):
@@ -42,7 +59,23 @@ class AssistantFnc(llm.FunctionContext):
 
 
 async def entrypoint(ctx: JobContext):
-    gpt = openai.LLM(model="gpt-4-turbo")
+    
+    azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+    if azure_endpoint:
+        azure_deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT")
+        if not azure_deployment:
+            raise ValueError("AZURE_OPENAI_DEPLOYMENT must be set")
+
+        azure_client = AsyncAzureOpenAI(  
+            api_key = os.environ["OPENAI_API_KEY"],
+            api_version = AZURE_OPENAI_APIVERSION,
+            azure_endpoint = azure_endpoint,
+            azure_deployment = azure_deployment
+        )
+        
+        gpt = openai.LLM(model=OPENAI_MODEL, client=azure_client)
+    else:
+        gpt = openai.LLM(model=OPENAI_MODEL)
 
     initial_ctx = llm.ChatContext(
         messages=[
@@ -55,22 +88,21 @@ async def entrypoint(ctx: JobContext):
 
     assistant = VoiceAssistant(
         vad=silero.VAD(),
-        stt=deepgram.STT(),
+        stt=azure.STT(),
         llm=gpt,
-        tts=elevenlabs.TTS(),
+        tts=azure.TTS(),
         fnc_ctx=AssistantFnc(),
         chat_ctx=initial_ctx,
+        allow_interruptions=False,
+        transcription=False,
     )
 
-    async def _answer_light_toggling(enabled_rooms, disabled_rooms):
+    async def _answer_light_toggling(changed_room: str, changed_room_status: bool):
         prompt = "Make a summary of the following actions you did:"
-        if enabled_rooms:
-            enabled_rooms_str = ", ".join(enabled_rooms)
-            prompt += f"\n - You enabled the lights in the following rooms: {enabled_rooms_str}"
-
-        if disabled_rooms:
-            disabled_rooms_str = ", ".join(disabled_rooms)
-            prompt += f"\n - You disabled the lights in the following rooms {disabled_rooms_str}"
+        if changed_room_status:
+            prompt += f"\n - You enabled the lights in the following room: {changed_room}"
+        else:
+            prompt += f"\n - You disabled the lights in the following room: {changed_room}"
 
         chat_ctx = llm.ChatContext(
             messages=[llm.ChatMessage(role=llm.ChatRole.SYSTEM, text=prompt)]
@@ -86,12 +118,11 @@ async def entrypoint(ctx: JobContext):
     @assistant.on("function_calls_finished")
     def _function_calls_done(ctx: AssistantContext):
         logging.info("function_calls_done %s", ctx)
-        enabled_rooms = ctx.get_metadata("enabled_rooms", [])
-        disabled_rooms = ctx.get_metadata("disabled_rooms", [])
 
-        if enabled_rooms or disabled_rooms:
-            # if there was a change in the lights, summarize it and let the user know
-            asyncio.ensure_future(_answer_light_toggling(enabled_rooms, disabled_rooms))
+        changed_room = ctx.get_metadata('changed_room', None)
+        if changed_room and changed_room in light_state:
+            #if there was a change in the lights, summarize it and let the user know
+            asyncio.ensure_future(_answer_light_toggling(changed_room, light_state[changed_room]))
 
     assistant.start(ctx.room)
     await asyncio.sleep(3)

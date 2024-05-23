@@ -15,13 +15,25 @@ class ChatRole(enum.Enum):
     ASSISTANT = "assistant"
     TOOL = "tool"
 
+@define
+class Function:
+    arguments: str
+    name: str
+
+@define
+class ToolCall:
+    id: str
+    function: Function
+    type: str = 'function'
 
 @define
 class ChatMessage:
     role: ChatRole
-    text: str
-
-
+    text: str | None
+    id: str | None = None
+    name: str | None = None
+    tool_calls: list[ToolCall] = []
+    
 @define
 class ChatContext:
     messages: list[ChatMessage] = []
@@ -32,12 +44,10 @@ class ChoiceDelta:
     content: str | None = None
     role: ChatRole | None = None
 
-
 @define
 class Choice:
     delta: ChoiceDelta
     index: int = 0
-
 
 @define
 class ChatChunk:
@@ -60,7 +70,8 @@ class CalledFunction:
     fnc_name: str
     fnc: Callable
     args: dict
-
+    id: str | None = None
+    result: any | None = None
 
 class LLMStream(abc.ABC):
     def __init__(self) -> None:
@@ -71,7 +82,10 @@ class LLMStream(abc.ABC):
     def called_functions(self) -> list[CalledFunction]:
         """List of called functions from this stream."""
         return self._called_functions
-
+    @called_functions.setter
+    def called_functions(self, value):
+        self._called_functions = value
+        
     @abc.abstractmethod
     def __aiter__(self) -> "LLMStream": ...
 

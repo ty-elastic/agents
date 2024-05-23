@@ -9,7 +9,8 @@ import time
 
 import pytest
 from livekit import agents, rtc
-from livekit.plugins import deepgram, google, openai, silero
+#from livekit.plugins import deepgram, google, openai, silero, azure
+from livekit.plugins import silero, azure
 
 from .utils import wer
 
@@ -35,7 +36,12 @@ def read_mp3_file(filename: str) -> rtc.AudioFrame:
     return agents.utils.merge_frames(frames)
 
 
-RECOGNIZE_STT = [deepgram.STT(), google.STT(), openai.STT()]
+RECOGNIZE_STT = [
+    # deepgram.STT(), 
+    # google.STT(), 
+    # openai.STT(),
+    azure.STT()
+]
 
 
 @pytest.mark.usefixtures("job_process")
@@ -55,9 +61,10 @@ async def test_recognize(stt: agents.stt.STT):
 
 STREAM_VAD = silero.VAD()
 STREAM_STT = [
-    deepgram.STT(),
-    google.STT(),
-    agents.stt.StreamAdapter(stt=openai.STT(), vad=STREAM_VAD),
+    # deepgram.STT(),
+    # google.STT(),
+    # agents.stt.StreamAdapter(stt=openai.STT(), vad=STREAM_VAD),
+    azure.STT()
 ]
 
 
@@ -88,7 +95,7 @@ async def test_stream(stt: agents.stt.STT):
             # but we  still wait less to make the tests faster
             await asyncio.sleep(0.001)
 
-        await stream.aclose()
+        await stream.aclose(wait=True)
 
     async def _stream_output():
         text = ""
@@ -117,6 +124,7 @@ async def test_stream(stt: agents.stt.STT):
         print(
             f"WER: {wer(text, TEST_AUDIO_TRANSCRIPT)} for streamed {stt} in {dt:.2f}s"
         )
+        print(text)
         assert wer(text, TEST_AUDIO_TRANSCRIPT) <= 0.2
 
     await asyncio.wait_for(

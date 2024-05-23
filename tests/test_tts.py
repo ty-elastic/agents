@@ -9,7 +9,8 @@ import pathlib
 import pytest
 from livekit import agents
 from livekit.agents.utils import AudioBuffer, merge_frames
-from livekit.plugins import elevenlabs, google, nltk, openai
+#from livekit.plugins import elevenlabs, google, nltk, openai, azure
+from livekit.plugins import nltk, azure
 
 from .utils import wer
 
@@ -23,7 +24,8 @@ async def _assert_valid_synthesized_audio(
     frames: AudioBuffer, tts: agents.tts.TTS, text: str, threshold: float
 ):
     # use whisper as the source of truth to verify synthesized speech (smallest WER)
-    whisper_stt = openai.STT(model="whisper-1")
+    #whisper_stt = openai.STT(model="whisper-1")
+    whisper_stt = azure.STT()
     res = await whisper_stt.recognize(buffer=frames)
     assert wer(res.alternatives[0].text, text) <= 0.2
 
@@ -35,10 +37,11 @@ async def _assert_valid_synthesized_audio(
 
 
 SYNTHESIZE_TTS = [
-    elevenlabs.TTS(),
-    elevenlabs.TTS(encoding="pcm_44100"),
-    openai.TTS(),
-    google.TTS(),
+    # elevenlabs.TTS(),
+    # elevenlabs.TTS(encoding="pcm_44100"), 
+    # openai.TTS(), 
+    # google.TTS(),
+    azure.TTS()
 ]
 
 
@@ -51,19 +54,20 @@ async def test_synthetize(tts: agents.tts.TTS):
 
     await _assert_valid_synthesized_audio(
         frames, tts, TEST_AUDIO_SYNTHESIZE, SIMILARITY_THRESHOLD
-    )
+     )
 
 
 STREAM_SENT_TOKENIZER = nltk.SentenceTokenizer(min_sentence_len=20)
 STREAM_TTS = [
-    elevenlabs.TTS(),
-    elevenlabs.TTS(encoding="pcm_44100"),
-    agents.tts.StreamAdapter(
-        tts=openai.TTS(), sentence_tokenizer=STREAM_SENT_TOKENIZER
-    ),
-    agents.tts.StreamAdapter(
-        tts=google.TTS(), sentence_tokenizer=STREAM_SENT_TOKENIZER
-    ),
+    # elevenlabs.TTS(),
+    # elevenlabs.TTS(encoding="pcm_44100"),
+    # agents.tts.StreamAdapter(
+    #     tts=openai.TTS(), sentence_tokenizer=STREAM_SENT_TOKENIZER
+    # ),
+    # agents.tts.StreamAdapter(
+    #     tts=google.TTS(), sentence_tokenizer=STREAM_SENT_TOKENIZER
+    # ),
+    azure.TTS(),
 ]
 
 

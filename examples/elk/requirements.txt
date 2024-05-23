@@ -1,0 +1,10 @@
+elasticsearch[async]>=7.8.0
+opencv-python
+sentence-transformers
+python-dateutil
+
+livekit-plugins-silero~=0.4.0
+
+deps/livekit-agents
+deps/livekit-plugins-azure
+deps/livekit-plugins-openai
