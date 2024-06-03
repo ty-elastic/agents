@@ -55,7 +55,7 @@ class _AssistantOptions:
     sentence_tokenizer: tokenize.SentenceTokenizer
     hyphenate_word: Callable[[str], list[str]]
     transcription_speed: float
-
+    on_recv_final_transcript: Callable[[str, str], bool]
 
 @define(kw_only=True, frozen=True)
 class _StartArgs:
@@ -126,6 +126,7 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
         word_tokenizer: tokenize.WordTokenizer = tokenize.basic.WordTokenizer(),
         hyphenate_word: Callable[[str], list[str]] = tokenize.basic.hyphenate_word,
         transcription_speed: float = 3.83,
+        on_recv_final_transcript: Callable[[str, str], bool] | None = None,
     ) -> None:
         super().__init__()
         self._loop = loop or asyncio.get_event_loop()
@@ -141,6 +142,7 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
             word_tokenizer=word_tokenizer,
             hyphenate_word=hyphenate_word,
             transcription_speed=transcription_speed,
+            on_recv_final_transcript=on_recv_final_transcript,
         )
         self._vad, self._tts, self._llm, self._stt = vad, tts, llm, stt
         self._fnc_ctx = fnc_ctx
@@ -407,6 +409,10 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
     def _recv_final_transcript(self, ev: astt.SpeechEvent):
         self._log_debug(f"assistant - received transcript {ev.alternatives[0].text}")
         self._transcripted_text += ev.alternatives[0].text
+        if self._opts.on_recv_final_transcript is not None:
+            process = self._opts.on_recv_final_transcript(self._linked_participant, ev.alternatives[0].text)
+            if not process:
+                return
         self._maybe_answer(self._transcripted_text)
 
     def _recv_interim_transcript(self, ev: astt.SpeechEvent):
