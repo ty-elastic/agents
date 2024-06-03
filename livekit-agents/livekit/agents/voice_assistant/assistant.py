@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import contextvars
 import time
+import json
 from typing import Any, AsyncIterable, Callable, Literal
 
 from attrs import define
@@ -177,6 +178,8 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
         self._last_speech_prob = 0.0
         self._transcripted_text, self._interim_text = "", ""
         self._start_future = asyncio.Future()
+        
+        self._func_results = []
 
     def on(self, event: EventTypes, callback: Callable | None = None) -> Callable:
         """Register a callback for an event
@@ -444,6 +447,10 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
         self._agent_speaking = False
         self.emit("agent_stopped_speaking")
 
+    def _app_answered_function(self, func_msgs: list[allm.ChatMessage]):
+        self._log_debug("assistant - responding to function results")
+        self._answer_function(func_msgs=func_msgs)
+
     async def _recognize_loop(self):
         """Recognize speech from the audio stream and do voice activity detection"""
         assert self._audio_stream is not None
@@ -486,6 +493,12 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
                         self._recv_interim_transcript(stt_event)
                     elif stt_event.type == astt.SpeechEventType.END_OF_SPEECH:
                         self._transcript_finished(stt_event)
+                        
+                if len(self._func_results) > 0:
+                    self._app_answered_function(self._func_results)
+                    self._func_results = []
+                    
+                    
         except Exception:
             logger.exception("error in recognize loop")
         finally:
@@ -579,6 +592,36 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
         self._log_debug("assistant - validating answer")
         self._transcripted_text = self._interim_text = ""
         _validate_speech(self._answer_speech)
+
+
+    def _answer_function(self, func_msgs: list[allm.ChatMessage]) -> None:
+        async def _answer_if_validated(
+            ctx: allm.ChatContext, data: _SpeechData
+        ) -> None:
+            try:
+                data.source = await self._llm.chat(ctx, fnc_ctx=self._fnc_ctx)
+                await self._start_speech(data, interrupt_current_if_possible=False)
+            except Exception:
+                logger.exception("error while answering")
+
+        self._answer_speech = _SpeechData(
+            allow_interruptions=self._opts.allow_interruptions,
+            add_to_ctx=True,
+            val_ch=aio.Chan[None](),
+        )
+        self._answer_speech.validated = True
+        self._answer_speech.val_ch.close()
+
+        self._chat_ctx.messages.extend(func_msgs)
+        ctx = allm.ChatContext(messages=self._chat_ctx.messages)
+
+        if self._maybe_answer_task is not None:
+            self._maybe_answer_task.cancel()
+
+        t = asyncio.create_task(_answer_if_validated(ctx, self._answer_speech))
+        self._maybe_answer_task = t
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
 
     def _maybe_answer(self, text: str) -> None:
         async def _answer_if_validated(
@@ -695,7 +738,8 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
             )
 
             if data.add_to_ctx:
-                self._chat_ctx.messages.append(msg)
+                if len(msg.text) > 0:
+                    self._chat_ctx.messages.append(msg)
                 if data.interrupted:
                     self.emit("agent_speech_interrupted", self._chat_ctx, msg)
                     await tts_forwarder.aclose(wait=False)
@@ -783,6 +827,10 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
                 assistant_ctx = AssistantContext(self, data.source)
                 token = _ContextVar.set(assistant_ctx)
                 async for chunk in data.source:
+                    if isinstance(chunk, allm.ChatMessage):
+                        self._chat_ctx.messages.append(chunk)
+                        continue
+                    
                     alt = chunk.choices[0].delta.content
                     if not alt:
                         continue
@@ -800,6 +848,15 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
 
                 if len(data.source.called_functions) > 0:
                     self.emit("function_calls_finished", assistant_ctx)
+                    for func in data.source.called_functions:
+                        if func.result is not None:
+                            func_msg = allm.ChatMessage(
+                                text=json.dumps(func.result),
+                                role=allm.ChatRole.TOOL,
+                                name=func.fnc_name,
+                                id=func.id
+                            )
+                            self._func_results.append(func_msg)
 
                 _ContextVar.reset(token)
             else:

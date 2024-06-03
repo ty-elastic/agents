@@ -15,13 +15,25 @@ class ChatRole(enum.Enum):
     ASSISTANT = "assistant"
     TOOL = "tool"
 
+@define
+class Function:
+    arguments: str
+    name: str
+
+@define
+class ToolCall:
+    id: str
+    function: Function
+    type: str = 'function'
 
 @define
 class ChatMessage:
     role: ChatRole
-    text: str
-
-
+    text: str | None
+    id: str | None = None
+    name: str | None = None
+    tool_calls: list[ToolCall] = []
+    
 @define
 class ChatContext:
     messages: list[ChatMessage] = []
@@ -60,7 +72,8 @@ class CalledFunction:
     fnc_name: str
     fnc: Callable
     args: dict
-
+    id: str | None = None
+    result: any | None = None
 
 class LLMStream(abc.ABC):
     def __init__(self) -> None:
