@@ -193,17 +193,16 @@ class ElasticRagPlugin:
                 es_query['sub_searches'].append(elser)
             else:
                 external = setup_query()
-                task = asyncio.create_task(asyncio.to_thread(self._model.encode, query).tolist())
+                task = asyncio.create_task(asyncio.to_thread(self._model.encode, query))
                 await task
                 external['query']['bool']['must'].append(
                     {"knn": {
                         "field": "clause.dense",
-                        "query_vector": task.result(),
+                        "query_vector": task.result().tolist(),
                         "num_candidates": 10
                     }})
                 es_query['sub_searches'].append(external)
-            #print(es_query)
-    
+
             es = AsyncElasticsearch(self._config.es_endpoint, api_key=self._config.es_apikey)
             response = await es.search(
                 index=f"{self._config.es_index_prefix}-{TRANSCRIPTION_INDEX_POSTFIX}",
@@ -218,7 +217,7 @@ class ElasticRagPlugin:
             for hit in response["hits"]["hits"]:
                 clause = self.conform_search_result(hit['fields'])
                 clauses.append({'quote': clause['clause.text'], 'speaker': clause['speaker.name.text']})
-            #print(clauses)
+
             return clauses
         except Exception as inst:
             print(f"unable to query transcript:{inst}")
@@ -230,9 +229,9 @@ class ElasticRagPlugin:
             es = AsyncElasticsearch(self._config.es_endpoint, api_key=self._config.es_apikey)
             
             if self._semantic_model == SemanticModel.External:
-                task = asyncio.create_task(asyncio.to_thread(self._model.encode, transcript_record['clause']['text'])).tolist()
+                task = asyncio.create_task(asyncio.to_thread(self._model.encode, transcript_record['clause']['text']))
                 await task
-                transcript_record['clause.dense'] = task.result()
+                transcript_record['clause.dense'] = task.result().tolist()
             
             await es.index(
                 index=f"{self._config.es_index_prefix}-{TRANSCRIPTION_INDEX_POSTFIX}",

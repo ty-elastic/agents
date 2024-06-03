@@ -94,7 +94,6 @@ async def create_assistant(*, room: rtc.Room, participant: rtc.Participant, tran
     )
     
     def on_recv_final_transcript(participant: str, text: str) -> bool:
-        print(f"HERE!!! {text}")
         keyword_detected = detect_keyword(text)
         if keyword_detected:
             return True
