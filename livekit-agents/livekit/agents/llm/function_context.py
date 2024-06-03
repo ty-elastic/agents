@@ -81,7 +81,10 @@ class FunctionContext(abc.ABC):
                     default=default,
                 )
 
-            aifnc = AIFunction(metadata=metadata, fnc=member, args=args)
+            ret_val = None
+            if 'return' in type_hints:
+                ret_val = type_hints['return']
+            aifnc = AIFunction(metadata=metadata, fnc=member, args=args, ret_val=ret_val)
             self._fncs[metadata.name] = aifnc
 
     @property
@@ -121,6 +124,7 @@ class AIFunction:
     metadata: AIFncMetadata
     fnc: Callable
     args: dict[str, AIFncArg]
+    ret_val: type | None = None
 
 
 def is_type_supported(t: type) -> bool:

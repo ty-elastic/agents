@@ -16,6 +16,8 @@ from .llm import (
     Choice,
     ChoiceDelta,
     LLMStream,
+    ToolCall,
+    Function
 )
 
 __all__ = [
@@ -35,4 +37,6 @@ __all__ = [
     "AIFunction",
     "AIFncMetadata",
     "CalledFunction",
+    "ToolCall",
+    "Function"
 ]
