@@ -175,4 +175,4 @@ if __name__ == "__main__":
             start=False
         )
     
-    cli.run_app(WorkerOptions(request_fnc, worker_type=agent.JobType.JT_ROOM))
+    cli.run_app(WorkerOptions(request_fnc, worker_type=agent.JobType.JT_ROOM, host="0.0.0.0"))
